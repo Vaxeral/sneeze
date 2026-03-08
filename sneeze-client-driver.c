@@ -4,10 +4,11 @@ struct sneeze_driver driver;
 
 int main()
 {
+        float x = 0.0;
         /* triangle */
-        vector_t a[3] = { 3.0 / 4.0, 0.0, 0.0 };
-        vector_t b[3] = { 0.0, 4.0 / 4.0, 0.0 };
-        vector_t c[3] = { 0.1, 0.1, 0.0 };
+        vector_t a[3] = { 3.0 / 8.0, 0.0, 0.0 };
+        vector_t b[3] = { (0.0 - 1.0) / 8.0, 4.0 / 8.0, 0.0 };
+        vector_t c[3] = { 0.0, 0.0, 0.0 };
 
         if (driver_initialize(&driver) != 0)
         {
@@ -22,7 +23,7 @@ int main()
                 FD_ZERO(&readfds);
                 FD_SET(STDIN_FILENO, &readfds);
                 timeval.tv_sec = 0;
-                timeval.tv_usec = 1000; /* microseconds. */
+                timeval.tv_usec = 10000; /* microseconds. */
                 status = select(1, &readfds, NULL, NULL, &timeval);
                 switch (status)
                 {
@@ -43,7 +44,26 @@ int main()
                 }
                 driver_screen_clear(&driver);
                 /* graphics */
-                driver_screen_draw_triangle(&driver, a, b, c);
+                x += 0.01;
+                vector_t aa[3];
+                vector_t bb[3];
+                vector_t cc[3];
+
+                aa[0] = a[0] + 0.5 * cos(x);
+                aa[1] = a[1] + 0.5 * sin(x);
+                aa[2] = a[2];
+
+                bb[0] = b[0] + 0.5 * cos(x);
+                bb[1] = b[1] + 0.5 * sin(x);
+                bb[2] = b[2];
+
+                cc[0] = c[0] + 0.5 * cos(x);
+                cc[1] = c[1] + 0.5 * sin(x);
+                cc[2] = c[2];
+
+                // driver_screen_draw_triangle(&driver, aa, bb, cc);
+                driver_screen_draw_triangle(&driver, aa, bb, cc);
+
                 write(STDOUT_FILENO, "\x1b[H", 3);
                 write(STDOUT_FILENO, driver.screen, driver.screen_size);
         }
@@ -91,9 +111,10 @@ int driver_screen_draw_triangle(struct sneeze_driver *driver, vector_t *a, vecto
                         {
                                 continue;
                         }
-                        if (i[0] <= 1.0 && i[0] >= 0 && i[1] <= 1.0 && i[1] >= 0.0 && i[0] + i[1] <= 1.0)
+                        /* check if barycentric coordinates are within 0.0 and 1.0 this means the point is within the triangle and the triangle should be colored. */
+                        if (i[0] <= 1.0 && i[0] >= 0e-8 && i[1] <= 1.0 && i[1] >= 0e-8 && i[0] + i[1] <= 1.0)
                         {
-                                screen[ii][jj] = '+';
+                                screen[ii][jj] = '.';
                         }
                 }
         }
@@ -169,7 +190,7 @@ int barycentric(vector_t *a, vector_t *b, vector_t *c, vector_t *d, vector_t *e)
         l = h[0] * f[0] + h[1] * f[1] + h[2] * f[2];
         m = h[0] * g[0] + h[1] * g[1] + h[2] * g[2];
         n = i * k - j * j;
-        if (fabs(n) < 0e-8)
+        if (fabs(n) <= 0e-8)
         {
                 return 0 - 1;
         }
