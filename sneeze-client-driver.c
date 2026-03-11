@@ -1,249 +1,295 @@
-#include "sneeze-client-driver.h"
+#include <errno.h>
+#include <math.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <unistd.h>
 
-struct sneeze_driver driver;
+#ifndef USE_FLOAT
+typedef double scalar_t;
+typedef double vector_t;
+typedef double matrix_t;
+#else
+typedef float scalar_t;
+typedef float vector_t;
+typedef float matrix_t;
+#endif
 
-int main()
+#define TIMEVAL_SEC 0
+#define TIMEVAL_USEC 1000
+
+enum status
 {
-        float x = 0.0;
-        /* triangle */
-        vector_t a[3] = { 3.0 / 8.0, 0.0, 0.0 };
-        vector_t b[3] = { (0.0 - 1.0) / 8.0, 4.0 / 8.0, 0.0 };
-        vector_t c[3] = { 0.0, 0.0, 0.0 };
+        SUCCESS = 0,
+        FAILURE = 0 - 1
+};
 
-        if (driver_initialize(&driver) != 0)
+void screen_set(void);
+int input(void);
+int configure(void);
+void raster_triangle(vector_t *a, vector_t *b, vector_t *c);
+
+struct termios termios;
+struct termios initial_termios;
+
+#ifndef SCREEN_SIZE
+#define SCREEN_SIZE 65536
+#endif
+
+char newline[] = "\r\n";
+#define NEWLINE_SIZE (sizeof newline - 1)
+char screen[SCREEN_SIZE];
+int screen_size;
+int screen_column;
+int screen_row;
+
+int main(int argument_count, char *argument_array[])
+{
+        scalar_t x = 0.0;
+        vector_t a[3] = { 3.0 / 4.0, 0.0 / 4.0, 1.0 };
+        vector_t b[3] = { 0.0 - 1.0 / 4.0, 4.0 / 4.0, 1.0 };
+        vector_t c[3] = { 0.0 / 4.0, 0.0 / 4.0, 1.0 };
+        int stop = 0;
+        (void) argument_count;
+        (void) argument_array;
+        if (configure() != SUCCESS)
         {
                 return EXIT_FAILURE;
         }
-        while (1)
+        while (stop != 1)
         {
-                int status;
                 char character;
-                fd_set readfds;
-                struct timeval timeval;
-                FD_ZERO(&readfds);
-                FD_SET(STDIN_FILENO, &readfds);
-                timeval.tv_sec = 0;
-                timeval.tv_usec = 10000; /* microseconds. */
-                status = select(1, &readfds, NULL, NULL, &timeval);
-                switch (status)
+                character = input();
+                if (character == ('q' & 0x1F))
                 {
-                case 0 - 1:
-                        return EXIT_FAILURE;
-                case 0:
-                        character = '\0';
-                        break;
-                default:
-                        if (read(STDIN_FILENO, &character, 1) == -1 && errno != EAGAIN)
-                        {
-                                return EXIT_FAILURE;
-                        }
+                        stop = 1;
                 }
-                if (character == ('q' & 0x1f))
-                {
-                        break;
-                }
-                driver_screen_clear(&driver);
-                /* graphics */
-                x += 0.01;
+
+                /*
+                        set cursor to row 1, column 1.
+                        we may want to merge write calls by
+                        appending to a buffer but i am
+                        holding off for now.
+                */
                 vector_t aa[3];
                 vector_t bb[3];
                 vector_t cc[3];
-
-                aa[0] = a[0] + 0.5 * cos(x);
-                aa[1] = a[1] + 0.5 * sin(x);
-                aa[2] = a[2];
-
-                bb[0] = b[0] + 0.5 * cos(x);
-                bb[1] = b[1] + 0.5 * sin(x);
-                bb[2] = b[2];
-
-                cc[0] = c[0] + 0.5 * cos(x);
-                cc[1] = c[1] + 0.5 * sin(x);
-                cc[2] = c[2];
-
-                // driver_screen_draw_triangle(&driver, aa, bb, cc);
-                driver_screen_draw_triangle(&driver, aa, bb, cc);
-
-                write(STDOUT_FILENO, "\x1b[H", 3);
-                write(STDOUT_FILENO, driver.screen, driver.screen_size);
+                aa[0] = a[0];
+                aa[1] = a[1];
+                aa[2] = a[2] + 0.5 * sin(x);
+                bb[0] = b[0];
+                bb[1] = b[1];
+                bb[2] = b[2] + 0.5 * sin(x);
+                cc[0] = c[0];
+                cc[1] = c[1];
+                cc[2] = c[2] + 0.5 * sin(x);
+                x += 0.01;
+                screen_set();
+                raster_triangle(aa, bb, cc);
+                (void) write(STDOUT_FILENO, "\x1b[H", 3);
+                (void) write(STDOUT_FILENO, screen, screen_size);
         }
-        return 0;
+        return EXIT_SUCCESS;
 }
 
-void quit(void)
+int input(void)
 {
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &driver.termios[1]);
-}
-
-int driver_screen_draw_triangle(struct sneeze_driver *driver, vector_t *a, vector_t *b, vector_t *c)
-{
-        int ii;
-        int jj;
-        vector_t d[3];
-        if (triangle_normal(a, b, c, d) != 0)
+        char character;
+        fd_set read_set;
+        struct timeval timeval;
+        timeval.tv_sec = TIMEVAL_SEC;
+        timeval.tv_usec = TIMEVAL_USEC;
+        FD_ZERO(&read_set);
+        FD_SET(STDIN_FILENO, &read_set);
+        switch (select(1, &read_set, NULL, NULL, &timeval))
         {
-                return 0 - 1;
-        }
-        for (ii = 0; ii < driver->screen_row; ++ii)
-        {
-                for (jj = 0; jj < driver->screen_column - 2; ++jj)
+        case FAILURE:
+                return errno;
+        case 0:
+                return '\0';
+        default:
+                if (read(STDIN_FILENO, &character, 1) == FAILURE && errno != EAGAIN)
                 {
-                        vector_t e[3];
-                        vector_t f[3];
-                        scalar_t g;
-                        vector_t h[3];
-                        vector_t i[3];
-                        char (*screen)[driver->screen_column] = (void *)driver->screen;
-                        e[0] = 0.0;
-                        e[1] = 0.0;
-                        e[2] = 0.0 - 1.0;
-                        f[0] = (scalar_t)jj / driver->screen_column * 2.0 - 1.0;
-                        f[1] = -((scalar_t)ii / driver->screen_row * 2.0 - 1.0);
-                        f[2] = 1.0;
-                        if (plane_hit(a, d, e, f, &g) != 0)
-                        {
-                                continue;
-                        }
-                        h[0] = e[0] + f[0] * g;
-                        h[1] = e[1] + f[1] * g;
-                        h[2] = e[2] + f[2] * g;
-                        if (barycentric(a, b, c, h, i) != 0)
-                        {
-                                continue;
-                        }
-                        /* check if barycentric coordinates are within 0.0 and 1.0 this means the point is within the triangle and the triangle should be colored. */
-                        if (i[0] <= 1.0 && i[0] >= 0e-8 && i[1] <= 1.0 && i[1] >= 0e-8 && i[0] + i[1] <= 1.0)
-                        {
-                                screen[ii][jj] = '.';
-                        }
+                        return errno;
                 }
         }
-        return 0;
+        return character;
 }
 
-int driver_screen_clear(struct sneeze_driver *driver)
+void restore(void)
 {
-        memset(driver->screen, ' ', driver->screen_size);
+        /* show cursor */
+        (void) write(STDOUT_FILENO, "\x1b[?25h", 6);
+        /* disable alternate buffer */
+        (void) write(STDOUT_FILENO, "\x1b[?1049l", 8);
+        (void) tcsetattr(STDOUT_FILENO, TCSAFLUSH, &initial_termios);
+}
+
+void screen_set(void)
+{
+        int i;
+        char (*screen_buffer)[screen_column] = (void *)screen;
+        (void) memset(screen, ' ', screen_size);
+        for (i = 0; i < screen_row; ++i)
         {
-                int i;
-                char (*screen)[driver->screen_column] = (void *)driver->screen;
-                for (i = 0; i < driver->screen_row; ++i)
-                {
-                        memcpy(&screen[i][driver->screen_column - 2], "\r\n", 2);
-                }
+                (void) memcpy(&screen_buffer[i][screen_column - 3], "~\r\n", 3);
         }
-        return 0;
 }
 
-int driver_initialize(struct sneeze_driver *driver)
+/* this function doubles as a signal handler.  pass 0, NULL, NULL when calling it. */
+void resize(int number, siginfo_t *info, void *context)
 {
+        int column;
+        int row;
+        int size;
         struct winsize winsize;
-        memset(driver, 0, sizeof *driver);
-        if (tcgetattr(STDIN_FILENO, &driver->termios[0]) != 0)
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &winsize) == FAILURE)
         {
                 exit(EXIT_FAILURE);
         }
-        atexit(quit);
-        driver->termios[1] = driver->termios[0];
-        driver->termios[0].c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-        driver->termios[0].c_oflag &= ~(OPOST);
-        driver->termios[0].c_cflag |= (CS8);
-        driver->termios[0].c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &driver->termios[0]) != 0)
+        column = screen_column;
+        row = screen_row;
+        size = screen_size;
+        /*
+                we add two to the terminal column because we
+                append a \r\n at the end of each row so that
+                we can write the buffer as is.
+                make sure when "drawing" to the buffer that
+                you do not write over these.
+        */
+        screen_column = winsize.ws_col + NEWLINE_SIZE;
+        screen_row = winsize.ws_row;
+        /*
+                we subtract two here so that we do not write the last \r\n.
+        */
+        screen_size = screen_column * screen_row - NEWLINE_SIZE;
+        if (screen_size > SCREEN_SIZE)
         {
-                exit(EXIT_FAILURE);
+                screen_column = column;
+                screen_row = row;
+                screen_size = size;
         }
-        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &winsize) != 0)
+        else
         {
-                exit(EXIT_FAILURE);
+                screen_set();
         }
-        driver->screen_column = winsize.ws_col + 2;
-        driver->screen_row = winsize.ws_row;
-        driver->screen_size = driver->screen_column * driver->screen_row - 2;
-        driver_screen_clear(driver);
-        return 0;
 }
 
-int barycentric(vector_t *a, vector_t *b, vector_t *c, vector_t *d, vector_t *e)
+int configure(void)
 {
-        vector_t f[3];
-        vector_t g[3];
-        vector_t h[3];
-        scalar_t i;
-        scalar_t j;
-        scalar_t k;
-        scalar_t l;
-        scalar_t m;
-        scalar_t n;
-        f[0] = b[0] - a[0];
-        f[1] = b[1] - a[1];
-        f[2] = b[2] - a[2];
-        g[0] = c[0] - a[0];
-        g[1] = c[1] - a[1];
-        g[2] = c[2] - a[2];
-        h[0] = d[0] - a[0];
-        h[1] = d[1] - a[1];
-        h[2] = d[2] - a[2];
-        i = f[0] * f[0] + f[1] * f[1] + f[2] * f[2];
-        j = f[0] * g[0] + f[1] * g[1] + f[2] * g[2];
-        k = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
-        l = h[0] * f[0] + h[1] * f[1] + h[2] * f[2];
-        m = h[0] * g[0] + h[1] * g[1] + h[2] * g[2];
-        n = i * k - j * j;
-        if (fabs(n) <= 0e-8)
+        struct sigaction signalaction = {0};
+        /* hide cursor */
+        (void) write(STDOUT_FILENO, "\x1b[?25l", 6);
+        /* enable alternate buffer */
+        (void) write(STDOUT_FILENO, "\x1b[?1049h", 8);
+        if (tcgetattr(STDOUT_FILENO, &initial_termios) == FAILURE)
         {
-                return 0 - 1;
+                return errno;
         }
-        e[0] = (k * l - j * m) / n;
-        e[1] = (i * m - j * l) / n;
-        e[2] = 1.0 - e[0] - e[1];
-        return 0;
+        (void) atexit(restore);
+        termios = initial_termios;
+        termios.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+        termios.c_oflag &= ~(OPOST);
+        termios.c_cflag |= (CS8);
+        termios.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+        if (tcsetattr(STDOUT_FILENO, TCSAFLUSH, &termios) == FAILURE)
+        {
+                return errno;
+        }
+        signalaction.sa_sigaction = &resize;
+        if (sigaction(SIGWINCH, &signalaction, NULL) == FAILURE)
+        {
+                return errno;
+        }
+        resize(0, NULL, NULL);
+        return SUCCESS;
 }
 
-int plane_hit(vector_t *a, vector_t *b, vector_t *c, vector_t *d, scalar_t *e)
+int barycentric(a, b, c, d, e)
+        vector_t *a;
+        vector_t *b;
+        vector_t *c;
+        vector_t *d;
+        vector_t *e;
 {
         scalar_t f;
-        vector_t g[3];
-        scalar_t h;
-        f = b[0] * d[0] + b[1] * d[1] + b[2] * d[2];
-        if (fabs(f) <= 0e-8)
+        scalar_t g;
+        f = ((b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]));
+        if (fabs(f) < 1e-8)
         {
-                return 0 - 1;
+                return FAILURE;
         }
-        g[0] = a[0] - c[0];
-        g[1] = a[1] - c[1];
-        g[2] = a[2] - c[2];
-        h = (g[0] * b[0] + g[1] * b[1] + g[2] * b[2]) / f;
-        if (h < 0e-8)
-        {
-                return 0 - 1;
-        }
-        *e = h;
-        return 0;
+        g = 1.0 / f;
+        e[0] = ((b[1] - c[1]) * (d[0] - c[0]) + (c[0] - b[0]) * (d[1] - c[1])) * g;
+        e[1] = ((c[1] - a[1]) * (d[0] - c[0]) + (a[0] - c[0]) * (d[1] - c[1])) * g;
+        e[2] = 1.0 - e[0] - e[1];
+        return SUCCESS;
 }
 
-int triangle_normal(vector_t *a, vector_t *b, vector_t *c, vector_t *d)
+void raster_triangle(vector_t *a, vector_t *b, vector_t *c)
 {
-        vector_t e[3];
-        vector_t f[3];
-        vector_t g[3];
+        char (*screen_buffer)[screen_column] = (void *)screen;
+        vector_t d[2];
+        vector_t e[2];
+        vector_t f[2];
+        scalar_t g;
         scalar_t h;
-        e[0] = a[0] - c[0];
-        e[1] = a[1] - c[1];
-        e[2] = a[2] - c[2];
-        f[0] = b[0] - c[0];
-        f[1] = b[1] - c[1];
-        f[2] = b[2] - c[2];
-        g[0] = e[1] * f[2] - e[2] * f[1];
-        g[1] = e[2] * f[0] - e[0] * f[2];
-        g[2] = e[0] * f[1] - e[1] * f[0];
-        h = sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
-        if (fabs(h) <= 0e-8)
+        vector_t i[2];
+        vector_t j[2];
+        vector_t k[2];
+        int minx;
+        int miny;
+        int maxx;
+        int maxy;
+        int x;
+        int y;
+        g = (screen_column - NEWLINE_SIZE) / 2.0;
+        h = screen_row / 2.0;
+        /*
+                learned this from tsoding.
+        */
+        i[0] = a[0] / a[2];
+        i[1] = a[1] / a[2];
+        j[0] = b[0] / b[2];
+        j[1] = b[1] / b[2];
+        k[0] = c[0] / c[2];
+        k[1] = c[1] / c[2];
+        d[0] = i[0] * g + g;
+        d[1] = 0 - i[1] * h + h;
+        e[0] = j[0] * g + g;
+        e[1] = 0 - j[1] * h + h;
+        f[0] = k[0] * g + g;
+        f[1] = 0 - k[1] * h + h;
+        /* get triangle bounds in "pixel" coordinates. */
+        minx = d[0] < e[0] ? (d[0] < f[0] ? d[0] : f[0]) : (e[0] < f[0] ? e[0] : f[0]);
+        miny = d[1] < e[1] ? (d[1] < f[1] ? d[1] : f[1]) : (e[1] < f[1] ? e[1] : f[1]);
+        maxx = d[0] > e[0] ? (d[0] > f[0] ? d[0] : f[0]) : (e[0] > f[0] ? e[0] : f[0]);
+        maxy = d[1] > e[1] ? (d[1] > f[1] ? d[1] : f[1]) : (e[1] > f[1] ? e[1] : f[1]);
+        if (minx < 0) minx = 0;
+        if (miny < 0) miny = 0;
+        if (maxx > screen_column - NEWLINE_SIZE) maxx = screen_column - NEWLINE_SIZE;
+        if (maxy > screen_row) maxy = screen_row;
+
+        for (y = miny; y < maxy; ++y)
         {
-                return 0 - 1;
+                for (x = minx; x < maxx; ++x)
+                {
+                        scalar_t i[2];
+                        vector_t j[3];
+                        i[0] = x;
+                        i[1] = y;
+                        if (barycentric(d, e, f, i, j) == SUCCESS)
+                        {
+                                int aa = j[0] < -1e-8;
+                                int bb = j[1] < -1e-8;
+                                int cc = j[2] < -1e-8;
+                                if (aa == bb && bb == cc)
+                                {
+                                        screen_buffer[y][x] = 'g';
+                                }
+                        }
+                }
         }
-        d[0] = g[0] / h;
-        d[1] = g[1] / h;
-        d[2] = g[2] / h;
-        return 0;
 }
