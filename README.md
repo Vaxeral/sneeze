@@ -3,12 +3,11 @@ a client and server for the first person dungeon crawler, sneeze.
 
 ## compilation
 you can run the bash script provided for both server and client or compile them yourself.
-- client
-
+### client
 `cc -O3 -o sneeze-client sneeze-common.c sneeze-client.c sneeze-client-driver.c -lm`
-- server
-
+### server
 `cc -O3 -o sneeze-server sneeze-common.c sneeze-server.c sneeze-server-driver.c -lm`
+
 the client uses a fixed sized buffer for for its screen.  pass `-DSCREEN_SIZE=65336` for example.
 
 ## note
